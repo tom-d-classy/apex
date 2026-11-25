@@ -142,3 +142,30 @@ button:disabled { cursor: wait; opacity: .65; }
   .navigation a { min-width: 0; }
   .navigation .brand { display: none; }
 }
+
+.core { display: grid; gap: var(--space); }
+.core-form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-block: 16px; }
+.core-form label { display: grid; gap: 4px; min-width: 0; }
+.core-form input, .core-form select {
+  min-height: 44px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--muted);
+  border-radius: var(--control-radius);
+  background: var(--page);
+}
+.core a { text-decoration: underline; text-underline-offset: 3px; }
+.space-group { padding-block: 12px; border-top: 1px solid var(--edge); }
+.space-group h3 { font-weight: 650; }
+.space-group a { display: inline-flex; align-items: center; min-height: 44px; }
+.tasks { padding: 0; }
+.task-row { display: grid; gap: 6px; padding: 12px 0; border-top: 1px solid var(--edge); }
+.task-check { display: flex; align-items: center; gap: 12px; min-height: 44px; cursor: pointer; }
+.task-check input { width: 20px; height: 20px; accent-color: var(--accent); }
+.task-row time, .task-row p { color: var(--muted); }
+.task-row summary { min-height: 44px; padding-block: 10px; cursor: pointer; }
+.progress-field { display: grid; max-width: 320px; gap: 6px; }
+.progress-field input { min-height: 44px; accent-color: var(--accent); }
+.momentum-total { display: block; margin-top: 8px; font: 48px/1 var(--display); }
+.momentum svg { display: block; width: 100%; max-height: 220px; margin-block: 8px; }

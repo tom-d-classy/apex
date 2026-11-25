@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Calendar, Folder, House, Library, Settings, Briefcase, Moon, Sun, Monitor } from 'lucide-react'
 import type { Session } from '@supabase/supabase-js'
-import { cumulativeMomentum } from '../packages/engine'
+import { Core } from './Core'
 import { auth } from './auth'
 import './style.css'
 
@@ -25,7 +25,7 @@ function App() {
   const [emailOpen, setEmailOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
-  const current = routes.find(item => routeHref(item.name) === route)?.name ?? 'Home'
+  const current = routes.find(item => routeHref(item.name) === route || route.startsWith(routeHref(item.name) + '/'))?.name ?? 'Home'
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -98,7 +98,6 @@ function App() {
       </nav>
       <header className="glass topbar">
         <span>APEX</span>
-        <span className="chip" aria-label="Momentum">Momentum <strong>{cumulativeMomentum([]).toFixed(2)}</strong></span>
         <button className="quiet" onClick={async () => {
           const outcome = await auth?.signOut()
           if (outcome?.error) setStatus('Could not sign out. Try again.')
@@ -113,7 +112,7 @@ function App() {
               <button key={value} aria-pressed={theme === value} onClick={() => setTheme(value)}><Icon size={16} />{label}</button>
             )}
           </div>
-        </section> : <section className="glass panel empty"><h2>Nothing here yet.</h2></section>}
+        </section> : current === 'Home' || current === 'Projects' ? <Core key={session.user.id} route={route} owner={session.user.id} /> : <section className="glass panel empty"><h2>Nothing here yet.</h2></section>}
         {status && <p role="status">{status}</p>}
       </main>
     </div>
