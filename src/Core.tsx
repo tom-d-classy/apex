@@ -4,24 +4,37 @@ import { supabase } from './auth'
 
 type Space = { id: string; title: string }
 type Project = Space & { space_id: string; status: string }
-type Task = Space & { project_id: string | null; deadline: string | null; completion: number; cancelled_at: string | null }
+type Task = Space & { project_id: string | null; deadline: string | null; completion: number; cancelled_at: string | null; recurrence_id: string | null }
 type Entry = { id: number; project_id: string | null; task_id: string | null; occurred_at: string; value: number; reason: string; kind: string }
 type Pause = { project_id: string; began_at: string; ended_at: string | null }
 type Dependency = { task_id: string; prerequisite_id: string }
+type Recurrence = { id: string; repeat_unit: string; repeat_every: number; stopped_at: string | null }
 type Workspace = {
-  spaces: Space[]; projects: Project[]; tasks: Task[]; entries: Entry[]; pauses: Pause[]; dependencies: Dependency[]
+  spaces: Space[]; projects: Project[]; tasks: Task[]; entries: Entry[]; pauses: Pause[]; dependencies: Dependency[]; recurrences: Recurrence[]
 }
 
 async function readWorkspace(): Promise<Workspace> {
   const client = supabase!
-  const [spaces, projects, tasks, pauses, dependencies] = await Promise.all([
+  const [spaces, projects, pauses, dependencies, recurrences] = await Promise.all([
     client.from('apex_spaces').select('id,title').order('title'),
     client.from('apex_projects').select('id,title,space_id,status').order('title'),
-    client.from('apex_tasks').select('id,title,project_id,deadline,completion,cancelled_at').order('deadline', { nullsFirst: false }),
     client.from('apex_project_pauses').select('project_id,began_at,ended_at'),
     client.from('apex_task_dependencies').select('task_id,prerequisite_id'),
+    client.from('apex_recurring_tasks').select('id,repeat_unit,repeat_every,stopped_at'),
   ])
-  for (const result of [spaces, projects, tasks, pauses, dependencies]) if (result.error) throw result.error
+  for (const result of [spaces, projects, pauses, dependencies, recurrences]) if (result.error) throw result.error
+  const tasks: Task[] = []
+  let lastTaskId: string | undefined
+  for (;;) {
+    let request = client.from('apex_tasks').select('id,title,project_id,deadline,completion,cancelled_at,recurrence_id').order('id').limit(500)
+    if (lastTaskId) request = request.gt('id', lastTaskId)
+    const { data, error } = await request
+    if (error) throw error
+    tasks.push(...data)
+    if (data.length < 500) break
+    lastTaskId = data[data.length - 1].id
+  }
+  tasks.sort((a, b) => (a.deadline ?? 'z').localeCompare(b.deadline ?? 'z'))
   const entries: Entry[] = []
   let lastId = 0
   for (;;) {
@@ -32,7 +45,7 @@ async function readWorkspace(): Promise<Workspace> {
     if (data.length < 500) break
     lastId = data[data.length - 1].id
   }
-  return { spaces: spaces.data!, projects: projects.data!, tasks: tasks.data!, entries, pauses: pauses.data!, dependencies: dependencies.data! }
+  return { spaces: spaces.data!, projects: projects.data!, tasks, entries, pauses: pauses.data!, dependencies: dependencies.data!, recurrences: recurrences.data! }
 }
 
 const ranges = ['Day', 'Week', 'Month', 'Year', 'Lifetime'] as const
@@ -87,12 +100,14 @@ function Momentum({ entries }: { entries: Entry[] }) {
   </section>
 }
 
-function TaskRow({ task, entries, tasks, prerequisites, pauses, onProgress, onCancel, onDependency, busy }: {
+function TaskRow({ task, entries, tasks, prerequisites, pauses, recurrence, onStopRecurrence, onProgress, onCancel, onDependency, busy }: {
   task: Task
   entries: Entry[]
   tasks: Task[]
   prerequisites: string[]
   pauses: Pause[]
+  recurrence?: Recurrence
+  onStopRecurrence: (id: string) => void
   onProgress: (id: string, completion: number) => void
   onCancel: (id: string) => void
   onDependency: (task: string, prerequisite: string, remove: boolean) => void
@@ -103,6 +118,7 @@ function TaskRow({ task, entries, tasks, prerequisites, pauses, onProgress, onCa
   const [done, setDone] = useState('')
   const [total, setTotal] = useState('')
   const [confirmCancel, setConfirmCancel] = useState(false)
+  const [confirmStop, setConfirmStop] = useState(false)
   useEffect(() => setProgress(task.completion), [task.completion])
   const now = Date.now()
   const deadline = task.deadline ? Date.parse(task.deadline) : now
@@ -118,6 +134,7 @@ function TaskRow({ task, entries, tasks, prerequisites, pauses, onProgress, onCa
       <span>{task.title}</span>
     </label>
     {task.deadline && <time dateTime={task.deadline}>{new Date(task.deadline).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</time>}
+    {recurrence && <p>{recurrence.stopped_at ? 'Repeats stopped' : `Repeats every ${recurrence.repeat_every} ${recurrence.repeat_unit}`}</p>}
     {task.cancelled_at && <p>Cancelled</p>}
     {overdueHours > 0 && !finished && <p>Overdue · {delayContribution(overdueHours).toFixed(2)} delay</p>}
     <details>
@@ -139,6 +156,11 @@ function TaskRow({ task, entries, tasks, prerequisites, pauses, onProgress, onCa
           <button type="button" onClick={() => setConfirmCancel(false)}>Keep task</button>
         </div> : <button type="button" className="quiet" onClick={() => setConfirmCancel(true)}>Cancel task</button>)}
       </>}
+      {recurrence && !recurrence.stopped_at && (confirmStop ? <div role="group" aria-label="Confirm stopping repeats">
+        <p>Stop creating new occurrences? Existing tasks and Momentum history will stay.</p>
+        <button type="button" disabled={busy} onClick={() => onStopRecurrence(recurrence.id)}>Confirm stop</button>
+        <button type="button" onClick={() => setConfirmStop(false)}>Keep repeating</button>
+      </div> : <button type="button" className="quiet" onClick={() => setConfirmStop(true)}>Stop future repeats</button>)}
       <h3>Prerequisites</h3>
       <ul>{prerequisites.map(id => <li key={id}>{tasks.find(item => item.id === id)?.title ?? 'Task'}
         <button type="button" disabled={busy} className="quiet" onClick={() => onDependency(task.id, id, true)}>Remove</button>
@@ -166,6 +188,7 @@ export function Core({ route, owner }: { route: string; owner: string }) {
   const [problem, setProblem] = useState('')
   const [busy, setBusy] = useState(false)
   const [filter, setFilter] = useState('all')
+  const [repeat, setRepeat] = useState('none')
   const projectId = /^#\/projects\/([^/]+)$/.exec(route)?.[1]
   const projectsPage = route.startsWith('#/projects')
   const project = data?.projects.find(item => item.id === projectId)
@@ -187,10 +210,11 @@ export function Core({ route, owner }: { route: string; owner: string }) {
       const { error } = await write()
       if (error) throw error
       form?.reset()
+      if (form?.elements.namedItem('repeat')) setRepeat('none')
       setData(await readWorkspace())
     } catch (error) {
       const message = typeof error === 'object' && error !== null && 'message' in error ? error.message : null
-      setProblem(message === 'That dependency would create a cycle.' ? message : 'Could not save or refresh your workspace. Refresh before retrying.')
+      setProblem(typeof message === 'string' && ['That dependency would create a cycle.', 'Choose a future deadline for the first repeat.'].includes(message) ? message : 'Could not save or refresh your workspace. Refresh before retrying.')
     } finally {
       setBusy(false)
     }
@@ -207,10 +231,17 @@ export function Core({ route, owner }: { route: string; owner: string }) {
     if (kind === 'project') void change(() => client.from('apex_projects').insert({ title, space_id: fields.get('space') }), form)
     if (kind === 'task') {
       const date = String(fields.get('deadline') ?? '')
-      void change(() => client.from('apex_tasks').insert({
-        title,
-        project_id: project?.id ?? (fields.get('project') || null),
-        deadline: date ? new Date(date).toISOString() : null,
+      const deadline = date ? new Date(date).toISOString() : null
+      const projectId = project?.id ?? (fields.get('project') || null)
+      if (repeat === 'none') {
+        void change(() => client.from('apex_tasks').insert({ title, project_id: projectId, deadline }), form)
+        return
+      }
+      const cadence = repeat === 'weekly' ? 7 : repeat === 'custom' ? Number(fields.get('repeatEvery')) : 1
+      void change(() => client.rpc('apex_add_recurring_task', {
+        task_title: title, task_project: projectId, first_deadline: deadline,
+        local_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        unit: repeat === 'monthly' ? 'months' : 'days', cadence,
       }), form)
     }
   }
@@ -266,12 +297,22 @@ export function Core({ route, owner }: { route: string; owner: string }) {
         <form className="core-form" onSubmit={event => add(event, 'task')}>
           <label>Task title<input name="title" required maxLength={200} /></label>
           {!project && data.projects.length > 0 && <label>Project<select name="project"><option value="">No project</option>{data.projects.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>}
-          <label>Deadline <small>(optional)</small><input type="datetime-local" name="deadline" /></label>
+          <label>Deadline {repeat === 'none' && <small>(optional)</small>}<input type="datetime-local" name="deadline" required={repeat !== 'none'} /></label>
+          <label>Repeat<select name="repeat" value={repeat} onChange={event => setRepeat(event.target.value)}>
+            <option value="none">Does not repeat</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="custom">Every N days</option>
+          </select></label>
+          {repeat === 'custom' && <label>Days between repeats<input name="repeatEvery" type="number" min="1" max="365" step="1" required defaultValue="2" /></label>}
           <button className="primary" disabled={busy}>Add task</button>
         </form>
         {tasks.length === 0 && <p>No tasks yet.</p>}
         <ul className="tasks">{tasks.map(task => <TaskRow key={task.id} task={task} entries={entries.filter(entry => entry.task_id === task.id)} busy={busy}
           pauses={data.pauses} tasks={data.tasks}
+          recurrence={data.recurrences.find(item => item.id === task.recurrence_id)}
+          onStopRecurrence={id => void change(() => supabase!.rpc('apex_stop_recurrence', { target: id }))}
           prerequisites={data.dependencies.filter(item => item.task_id === task.id).map(item => item.prerequisite_id)}
           onCancel={id => void change(() => supabase!.rpc('apex_cancel_task', { target: id }))}
           onDependency={(id, prerequisite, remove) => void change(() => remove
